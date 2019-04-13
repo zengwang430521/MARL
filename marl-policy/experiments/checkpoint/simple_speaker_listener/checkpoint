@@ -1,0 +1,2 @@
+model_checkpoint_path: "simple_speaker_listener1"
+all_model_checkpoint_paths: "simple_speaker_listener1"

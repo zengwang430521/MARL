@@ -1,0 +1,2 @@
+model_checkpoint_path: "simple_reference1"
+all_model_checkpoint_paths: "simple_reference1"

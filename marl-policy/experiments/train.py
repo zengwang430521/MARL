@@ -49,6 +49,17 @@ def mlp_model(input, num_outputs, scope, reuse=False, num_units=64, rnn_cell=Non
         out = layers.fully_connected(out, num_outputs=num_outputs, activation_fn=None)
         return out
 
+def two_heads_model(input, num_outputs_1, num_outputs_2, scope, reuse=False, num_units=64, rnn_cell=None):
+    # This model takes as input an observation and returns values of all actions and new observations
+    with tf.variable_scope(scope, reuse=reuse):
+        out = input
+        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
+        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
+        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
+        out_1 = layers.fully_connected(out, num_outputs=num_outputs_1, activation_fn=None)
+        out_2 = layers.fully_connected(out, num_outputs=num_outputs_2, activation_fn=None)
+        return out_1, out_2
+
 def make_env(scenario_name, arglist, benchmark=False):
     from multiagent.environment import MultiAgentEnv
     import multiagent.scenarios as scenarios
@@ -68,15 +79,16 @@ def make_env(scenario_name, arglist, benchmark=False):
 
 def get_trainers(env, num_adversaries, obs_shape_n, arglist):
     trainers = []
-    model = mlp_model
-    trainer = MADDPGAgentTrainer
+    q_model = mlp_model
+    p_model = two_heads_model
+    trainer = MADDPGAgentTrainerNewObs # trainer
     for i in range(num_adversaries):
         trainers.append(trainer(
-            "agent_%d" % i, model, obs_shape_n, env.action_space, i, arglist,
+            "agent_%d" % i, p_model, q_model, obs_shape_n, env.action_space, i, arglist,
             local_q_func=(arglist.adv_policy=='ddpg')))
     for i in range(num_adversaries, env.n):
         trainers.append(trainer(
-            "agent_%d" % i, model, obs_shape_n, env.action_space, i, arglist,
+            "agent_%d" % i, p_model, q_model, obs_shape_n, env.action_space, i, arglist,
             local_q_func=(arglist.good_policy=='ddpg')))
     return trainers
 
@@ -86,6 +98,7 @@ def train(arglist):
         # Create environment
         env = make_env(arglist.scenario, arglist, arglist.benchmark)
         # Create agent trainers
+        # env.n there are n agents
         obs_shape_n = [env.observation_space[i].shape for i in range(env.n)]
         num_adversaries = min(env.n, arglist.num_adversaries)
         trainers = get_trainers(env, num_adversaries, obs_shape_n, arglist)

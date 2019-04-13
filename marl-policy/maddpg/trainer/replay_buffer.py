@@ -1,7 +1,7 @@
 import numpy as np
 import random
 
-class ReplayBuffer_Old(object):
+class ReplayBuffer(object):
     def __init__(self, size):
         """Create Prioritized Replay buffer.
 
@@ -85,7 +85,7 @@ class ReplayBuffer_Old(object):
     def collect(self):
         return self.sample(-1)
 
-class ReplayBuffer(object):
+class SeqReplayBuffer(object):
     def __init__(self, size):
         """Create Prioritized Replay buffer.
 
