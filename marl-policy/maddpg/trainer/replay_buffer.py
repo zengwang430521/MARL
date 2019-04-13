@@ -197,7 +197,7 @@ class ReplayBuffer(object):
         return self._encode_sample(idxes)
 
     def seq_sample(self, batch_size):
-        idxes = self.make_seq_index(batch_size)
+        idxes = self.make_seq_index(batch_size, seq_length = 3)
         return self._encode_seq_sample(idxes)
 
     def collect(self):
