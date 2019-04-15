@@ -85,6 +85,45 @@ class ReplayBuffer(object):
     def collect(self):
         return self.sample(-1)
 
+    def sequence_sample_index(self, finish_index, step_size=16):
+        obs_seq, act_seq, rew_seq, obs_tp_seq, dones_seq = [], [], [], [], []
+        begin_index = [x - step_size for x in finish_index]
+        zero_data = self._storage[0]
+        zero_data = [[x * 0 for x in zero_data]]
+
+        for start, end in zip(begin_index, finish_index):
+            data = self._storage[max(start, 0):end]
+
+            for i in range(len(data) - 2, -1, -1):
+                done = data[i][4]
+                if done:
+                    data = data[i + 1:]
+                    break
+
+            while (len(data) < step_size):
+                data = zero_data + data
+
+            obs = np.stack([x[0] for x in data], axis=0)
+            act = np.stack([x[1] for x in data], axis=0)
+            rew = np.stack([x[2] for x in data], axis=0)
+            obs_tp = np.stack([x[3] for x in data], axis=0)
+            dones = np.stack([x[4] for x in data], axis=0)
+
+            obs_seq.append(obs)
+            act_seq.append(act)
+            rew_seq.append(rew)
+            obs_tp_seq.append(obs_tp)
+            dones_seq.append(dones)
+
+        obs_seq = np.stack(obs_seq, axis=1)
+        act_seq = np.stack(act_seq, axis=1)
+        rew_seq = np.stack(rew_seq, axis=1)
+        obs_tp_seq = np.stack(obs_tp_seq, axis=1)
+        dones_seq = np.stack(dones_seq, axis=1)
+
+        return obs_seq, act_seq, rew_seq, obs_tp_seq, dones_seq
+
+
 class SeqReplayBuffer(object):
     def __init__(self, size):
         """Create Prioritized Replay buffer.
