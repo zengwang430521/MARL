@@ -84,6 +84,22 @@ class BatchInput(PlacholderTfInput):
         super().__init__(tf.placeholder(dtype, [None] + list(shape), name=name))
 
 
+class SequenceBatchInput(PlacholderTfInput):
+    def __init__(self, shape, dtype=tf.float32, name=None):
+        """Creates a placeholder for a batch of tensors of a given shape and dtype
+
+        Parameters
+        ----------
+        shape: [int]
+            shape of a single elemenet of the batch
+        dtype: tf.dtype
+            number representation used for tensor contents
+        name: str
+            name of the underlying placeholder
+        """
+        super().__init__(tf.placeholder(dtype, [None] + [None] + list(shape), name=name))
+
+
 class Uint8Input(PlacholderTfInput):
     def __init__(self, shape, name=None):
         """Takes input in uint8 format which is cast to float32 and divided by 255

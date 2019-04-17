@@ -81,7 +81,9 @@ def get_trainers(env, num_adversaries, obs_shape_n, arglist):
     trainers = []
     q_model = mlp_model
     p_model = two_heads_model
-    trainer = MADDPGAgentTrainerNewObs # trainer
+    # trainer = MADDPGAgentTrainerNewObs # trainer
+    trainer = MADDPGAgentTrainer # trainer
+
     for i in range(num_adversaries):
         trainers.append(trainer(
             "agent_%d" % i, p_model, q_model, obs_shape_n, env.action_space, i, arglist,

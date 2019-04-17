@@ -26,17 +26,17 @@ def parse_args():
     parser.add_argument("--adv-policy", type=str, default="maddpg", help="policy of adversaries")
 
     # Core training parameters
-    parser.add_argument("--step-size", type=int, default=16, help="recurrent step num")
-    parser.add_argument("--burn-in-step", type=int, default=8, help="burn in step")
+    parser.add_argument("--step-size", type=int, default=8, help="recurrent step num")
+    parser.add_argument("--burn-in-step", type=int, default=4, help="burn in step")
     parser.add_argument("--lr", type=float, default=1e-2, help="learning rate for Adam optimizer")
     parser.add_argument("--gamma", type=float, default=0.95, help="discount factor")
-    parser.add_argument("--batch-size", type=int, default=256, help="number of episodes to optimize at the same time")
+    parser.add_argument("--batch-size", type=int, default=1024, help="number of episodes to optimize at the same time")
     parser.add_argument("--num-units", type=int, default=64, help="number of units in the mlp")
 
     # Checkpointing
     parser.add_argument("--exp-name", type=str, default='recurrent', help="name of the experiment")
     parser.add_argument("--save-dir", type=str, default="./checkpoint/recurrent/recurrent", help="directory in which training state and model should be saved")
-    parser.add_argument("--save-rate", type=int, default=1000, help="save model once every time this many episodes are completed")
+    parser.add_argument("--save-rate", type=int, default=200, help="save model once every time this many episodes are completed")
     parser.add_argument("--load-dir", type=str, default="", help="directory in which training state and model are loaded")
 
     # Evaluation
@@ -69,38 +69,12 @@ def q_model(input, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None)
         return out
 
 
-def p_model(input, state, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
+def p_policy_model(obs, state, obs_pred, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
     # This model takes as input an observation and returns values of all actions
     with tf.variable_scope(scope, reuse=reuse):
         # mlp to process the obs
         # input is in shape B * F
-
-        input = layers.fully_connected(input, num_outputs=num_units, activation_fn=tf.nn.relu)
-        input = layers.fully_connected(input, num_outputs=num_units, activation_fn=tf.nn.relu)
-        # LSTM
-        lstm = tf.contrib.rnn.BasicLSTMCell(num_units)
-        lstm_out, state = tf.nn.dynamic_rnn(lstm, input, state, initial_state=state)
-
-        # mpl to get the p value
-        out = layers.fully_connected(lstm_out, num_outputs=num_units, activation_fn=tf.nn.relu)
-        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
-        out = layers.fully_connected(out, num_outputs=num_outputs, activation_fn=None)
-
-        # mlp to predict next obs
-        next_obs = tf.concat([lstm_out, out], dim=1)
-        next_obs = layers.fully_connected(next_obs, num_outputs=num_units, activation_fn=tf.nn.relu)
-        next_obs = layers.fully_connected(next_obs, num_outputs=num_units, activation_fn=tf.nn.relu)
-        next_obs = layers.fully_connected(next_obs, num_outputs=tf.shape(input, 2), activation_fn=tf.nn.relu)
-
-        return out, state, next_obs
-
-
-def p_policy_model(input, state, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
-    # This model takes as input an observation and returns values of all actions
-    with tf.variable_scope(scope, reuse=reuse):
-        # mlp to process the obs
-        # input is in shape B * F
-
+        input = tf.concat([obs, obs_pred], axis=1)
         input = layers.fully_connected(input, num_outputs=num_units, activation_fn=tf.nn.relu)
         input = layers.fully_connected(input, num_outputs=num_units, activation_fn=tf.nn.relu)
         '''
@@ -111,13 +85,14 @@ def p_policy_model(input, state, num_outputs, scope, reuse=False, num_units=64, 
         # GRU
         input = tf.expand_dims(input, 1)
         gru = tf.contrib.rnn.GRUCell(num_units)
-        out, state = tf.nn.dynamic_rnn(gru, input, initial_state=state)
-        out = tf.squeeze(out, 1)
+        gru_out, state = tf.nn.dynamic_rnn(gru, input, initial_state=state)
+        gru_out = tf.squeeze(gru_out, 1)
+        out = gru_out
         # mpl to get the p value
         out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
         out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
         out = layers.fully_connected(out, num_outputs=num_outputs, activation_fn=None)
-        return out, state
+        return out, gru_out, state
 
 
 def p_predict_model(act, state, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
@@ -194,6 +169,7 @@ def train(arglist):
 
         obs_n = env.reset()
         state_n = [agent.p_init_state(1) for agent in trainers]
+        pred_n = [agent.init_pred(1) for agent in trainers]
 
         episode_step = 0
         train_step = 0
@@ -202,9 +178,11 @@ def train(arglist):
         print('Starting iterations...')
         while True:
             ## get action
-            temp = [agent.take_action(obs, state) for agent, obs, state in zip(trainers, obs_n, state_n)]
+            temp = [agent.take_action(obs, state, pred) for agent, obs, state, pred in zip(trainers, obs_n, state_n, pred_n)]
             action_n = [x[0] for x in temp]
             new_state_n = [x[1] for x in temp]
+            gru_out_n = [x[2] for x in temp]
+            new_pred_n = [agent.predict(act[None], gru_out) for agent, act, gru_out in zip(trainers, action_n, gru_out_n)]
 
             # environment step
             new_obs_n, rew_n, done_n, info_n = env.step(action_n)
@@ -218,6 +196,8 @@ def train(arglist):
                 agent.experience(obs_n[i], action_n[i], rew_n[i], new_obs_n[i], done_n[i], terminal)
             obs_n = new_obs_n
             state_n = new_state_n
+            # pred_n = [x.eval() for x in new_pred_n]
+            pred_n = new_pred_n
 
             for i, rew in enumerate(rew_n):
                 episode_rewards[-1] += rew
@@ -226,6 +206,7 @@ def train(arglist):
             if done or terminal:
                 obs_n = env.reset()
                 state_n = [agent.p_init_state(1) for agent in trainers]
+                pred_n = [agent.init_pred(1) for agent in trainers]
                 episode_step = 0
                 episode_rewards.append(0)
                 for a in agent_rewards:
@@ -235,10 +216,24 @@ def train(arglist):
             # increment global step counter
             train_step += 1
 
+            # for benchmarking learned policies
+            if arglist.benchmark:
+                for i, info in enumerate(info_n):
+                    agent_info[-1][i].append(info_n['n'])
+                if train_step > arglist.benchmark_iters and (done or terminal):
+                    file_name = arglist.benchmark_dir + arglist.exp_name + '.pkl'
+                    print('Finished benchmarking, now saving...')
+                    with open(file_name, 'wb') as fp:
+                        pickle.dump(agent_info[:-1], fp)
+                    break
+                continue
 
-            #################################################
-            #       need to be modified                     #
-            #################################################
+            # for displaying learned policies
+            if arglist.display:
+                time.sleep(0.05)
+                env.render()
+                continue
+
             # update all trainers, if not in display or benchmark mode
             loss = None
             for agent in trainers:
