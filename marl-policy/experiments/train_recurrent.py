@@ -9,8 +9,7 @@ import time
 import pickle
 
 import maddpg.common.tf_util as U
-from maddpg.trainer.maddpg import MADDPGAgentTrainer
-from maddpg.trainer.maddpg import MADDPGAgentTrainerRecurrent
+from maddpg.trainer.maddpg_recurrent import MADDPGAgentTrainerRecurrent
 
 import tensorflow.contrib.layers as layers
 
@@ -30,13 +29,15 @@ def parse_args():
     parser.add_argument("--burn-in-step", type=int, default=4, help="burn in step")
     parser.add_argument("--lr", type=float, default=1e-2, help="learning rate for Adam optimizer")
     parser.add_argument("--gamma", type=float, default=0.95, help="discount factor")
-    parser.add_argument("--batch-size", type=int, default=1024, help="number of episodes to optimize at the same time")
+    parser.add_argument("--batch-size", type=int, default=512, help="number of episodes to optimize at the same time")
     parser.add_argument("--num-units", type=int, default=64, help="number of units in the mlp")
+    parser.add_argument("--alpha", type=float, default=1e-3, help="pred_loss factor")
+
 
     # Checkpointing
     parser.add_argument("--exp-name", type=str, default='recurrent', help="name of the experiment")
-    parser.add_argument("--save-dir", type=str, default="./checkpoint/recurrent/recurrent", help="directory in which training state and model should be saved")
-    parser.add_argument("--save-rate", type=int, default=200, help="save model once every time this many episodes are completed")
+    parser.add_argument("--save-dir", type=str, default="./checkpoint/multitask/multitask", help="directory in which training state and model should be saved")
+    parser.add_argument("--save-rate", type=int, default=50, help="save model once every time this many episodes are completed")
     parser.add_argument("--load-dir", type=str, default="", help="directory in which training state and model are loaded")
 
     # Evaluation
@@ -69,30 +70,25 @@ def q_model(input, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None)
         return out
 
 
-def p_policy_model(obs, state, obs_pred, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
+def p_policy_model(input, state, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
     # This model takes as input an observation and returns values of all actions
     with tf.variable_scope(scope, reuse=reuse):
         # mlp to process the obs
         # input is in shape B * F
-        input = tf.concat([obs, obs_pred], axis=1)
+
         input = layers.fully_connected(input, num_outputs=num_units, activation_fn=tf.nn.relu)
         input = layers.fully_connected(input, num_outputs=num_units, activation_fn=tf.nn.relu)
-        '''
-        # LSTM
-        lstm = tf.contrib.rnn.BasicLSTMCell(num_units)
-        lstm_out, state = tf.nn.dynamic_rnn(lstm, input, sequence_length=1, initial_state=state)
-        '''
+
         # GRU
         input = tf.expand_dims(input, 1)
         gru = tf.contrib.rnn.GRUCell(num_units)
         gru_out, state = tf.nn.dynamic_rnn(gru, input, initial_state=state)
         gru_out = tf.squeeze(gru_out, 1)
-        out = gru_out
         # mpl to get the p value
-        out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
+        out = layers.fully_connected(gru_out, num_outputs=num_units, activation_fn=tf.nn.relu)
         out = layers.fully_connected(out, num_outputs=num_units, activation_fn=tf.nn.relu)
         out = layers.fully_connected(out, num_outputs=num_outputs, activation_fn=None)
-        return out, gru_out, state
+        return out, state, gru_out
 
 
 def p_predict_model(act, state, num_outputs, scope, reuse=False, num_units=64, rnn_cell=None):
@@ -102,7 +98,7 @@ def p_predict_model(act, state, num_outputs, scope, reuse=False, num_units=64, r
         next_obs = tf.concat([act, state], axis=1)
         next_obs = layers.fully_connected(next_obs, num_outputs=num_units, activation_fn=tf.nn.relu)
         next_obs = layers.fully_connected(next_obs, num_outputs=num_units, activation_fn=tf.nn.relu)
-        next_obs = layers.fully_connected(next_obs, num_outputs=num_outputs, activation_fn=tf.nn.relu)
+        next_obs = layers.fully_connected(next_obs, num_outputs=num_outputs, activation_fn=None)
         return next_obs
 
 
@@ -153,23 +149,32 @@ def train(arglist):
         # Initialize
         U.initialize()
 
+        final_ep_rewards = []  # sum of rewards for training curve
+        final_ep_ag_rewards = []  # agent rewards for training curve
+        episode_begin_num = 0
+
         # Load previous results, if necessary
         if arglist.load_dir == "":
             arglist.load_dir = arglist.save_dir
         if arglist.display or arglist.restore or arglist.benchmark:
             print('Loading previous state...')
             U.load_state(arglist.load_dir)
+            fname = './learning_curves/' + arglist.exp_name + '_rewards.pkl'
+            final_ep_rewards = pickle.load(open(fname, 'rb'))
+            fname = './learning_curves/' + arglist.exp_name + '_agrewards.pkl'
+            final_ep_ag_rewards = pickle.load(open(fname, 'rb'))
+            episode_begin_num = arglist.save_rate * len(final_ep_rewards)
+
+
+
 
         episode_rewards = [0.0]  # sum of rewards for all agents
         agent_rewards = [[0.0] for _ in range(env.n)]  # individual agent reward
-        final_ep_rewards = []  # sum of rewards for training curve
-        final_ep_ag_rewards = []  # agent rewards for training curve
         agent_info = [[[]]]  # placeholder for benchmarking info
         saver = tf.train.Saver()
 
         obs_n = env.reset()
         state_n = [agent.p_init_state(1) for agent in trainers]
-        pred_n = [agent.init_pred(1) for agent in trainers]
 
         episode_step = 0
         train_step = 0
@@ -178,11 +183,9 @@ def train(arglist):
         print('Starting iterations...')
         while True:
             ## get action
-            temp = [agent.take_action(obs, state, pred) for agent, obs, state, pred in zip(trainers, obs_n, state_n, pred_n)]
+            temp = [agent.take_action(obs, state) for agent, obs, state in zip(trainers, obs_n, state_n)]
             action_n = [x[0] for x in temp]
             new_state_n = [x[1] for x in temp]
-            gru_out_n = [x[2] for x in temp]
-            new_pred_n = [agent.predict(act[None], gru_out) for agent, act, gru_out in zip(trainers, action_n, gru_out_n)]
 
             # environment step
             new_obs_n, rew_n, done_n, info_n = env.step(action_n)
@@ -196,8 +199,6 @@ def train(arglist):
                 agent.experience(obs_n[i], action_n[i], rew_n[i], new_obs_n[i], done_n[i], terminal)
             obs_n = new_obs_n
             state_n = new_state_n
-            # pred_n = [x.eval() for x in new_pred_n]
-            pred_n = new_pred_n
 
             for i, rew in enumerate(rew_n):
                 episode_rewards[-1] += rew
@@ -206,7 +207,6 @@ def train(arglist):
             if done or terminal:
                 obs_n = env.reset()
                 state_n = [agent.p_init_state(1) for agent in trainers]
-                pred_n = [agent.init_pred(1) for agent in trainers]
                 episode_step = 0
                 episode_rewards.append(0)
                 for a in agent_rewards:
@@ -216,24 +216,10 @@ def train(arglist):
             # increment global step counter
             train_step += 1
 
-            # for benchmarking learned policies
-            if arglist.benchmark:
-                for i, info in enumerate(info_n):
-                    agent_info[-1][i].append(info_n['n'])
-                if train_step > arglist.benchmark_iters and (done or terminal):
-                    file_name = arglist.benchmark_dir + arglist.exp_name + '.pkl'
-                    print('Finished benchmarking, now saving...')
-                    with open(file_name, 'wb') as fp:
-                        pickle.dump(agent_info[:-1], fp)
-                    break
-                continue
 
-            # for displaying learned policies
-            if arglist.display:
-                time.sleep(0.05)
-                env.render()
-                continue
-
+            #################################################
+            #       need to be modified                     #
+            #################################################
             # update all trainers, if not in display or benchmark mode
             loss = None
             for agent in trainers:
@@ -242,15 +228,15 @@ def train(arglist):
                 loss = agent.update(trainers, train_step, arglist.step_size, arglist.burn_in_step)
 
             # save model, display training output
-            if terminal and (len(episode_rewards) % arglist.save_rate == 0):
-                U.save_state(arglist.save_dir, saver=saver)
+            episode_num = len(episode_rewards) + episode_begin_num
+            if terminal and (episode_num % arglist.save_rate == 0):
                 # print statement depends on whether or not there are adversaries
                 if num_adversaries == 0:
                     print("steps: {}, episodes: {}, mean episode reward: {}, time: {}".format(
-                        train_step, len(episode_rewards), np.mean(episode_rewards[-arglist.save_rate:]), round(time.time()-t_start, 3)))
+                        train_step, episode_num, np.mean(episode_rewards[-arglist.save_rate:]), round(time.time()-t_start, 3)))
                 else:
                     print("steps: {}, episodes: {}, mean episode reward: {}, agent episode reward: {}, time: {}".format(
-                        train_step, len(episode_rewards), np.mean(episode_rewards[-arglist.save_rate:]),
+                        train_step, episode_num, np.mean(episode_rewards[-arglist.save_rate:]),
                         [np.mean(rew[-arglist.save_rate:]) for rew in agent_rewards], round(time.time()-t_start, 3)))
                 t_start = time.time()
                 # Keep track of final episode reward
@@ -258,8 +244,19 @@ def train(arglist):
                 for rew in agent_rewards:
                     final_ep_ag_rewards.append(np.mean(rew[-arglist.save_rate:]))
 
+                rew_file_name = arglist.plots_dir + arglist.exp_name + '_rewards.pkl'
+                with open(rew_file_name, 'wb') as fp:
+                    pickle.dump(final_ep_rewards, fp)
+                agrew_file_name = arglist.plots_dir + arglist.exp_name + '_agrewards.pkl'
+                with open(agrew_file_name, 'wb') as fp:
+                    pickle.dump(final_ep_ag_rewards, fp)
+                print('...Finished total of {} episodes.'.format(episode_num))
+
+                U.save_state(arglist.save_dir, saver=saver)
+
+
             # saves final episode reward for plotting training curve later
-            if len(episode_rewards) > arglist.num_episodes:
+            if episode_num > arglist.num_episodes:
                 rew_file_name = arglist.plots_dir + arglist.exp_name + '_rewards.pkl'
                 with open(rew_file_name, 'wb') as fp:
                     pickle.dump(final_ep_rewards, fp)
